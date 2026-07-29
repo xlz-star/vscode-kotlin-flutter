@@ -1,5 +1,6 @@
 import * as child_process from "child_process";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import * as net from "net";
 import * as path from "path";
 import * as vscode from 'vscode';
@@ -13,11 +14,27 @@ import { fsExists } from "./util/fsUtils";
 import { ServerSetupParams } from "./setupParams";
 import { RunDebugCodeLens } from "./runDebugCodeLens";
 import { MainClassRequest, OverrideMemberRequest } from "./lspExtensions";
+import { resolveEffectiveProjectRoot } from "./projectRoot";
 
 /** Downloads and starts the language server. */
 export async function activateLanguageServer({ context, status, config, javaInstallation, javaOpts }: ServerSetupParams): Promise<KotlinApi> {
     LOG.info('Activating Kotlin Language Server...');
     status.update("Activating Kotlin Language Server...");
+    const activeDocument = vscode.window.activeTextEditor?.document;
+    const sourceWorkspaceFolder = activeDocument
+        ? vscode.workspace.getWorkspaceFolder(activeDocument.uri) ?? vscode.workspace.workspaceFolders?.[0]
+        : vscode.workspace.workspaceFolders?.[0];
+    const workspaceRoot = sourceWorkspaceFolder?.uri.fsPath;
+    const effectiveProjectRoot = workspaceRoot
+        ? resolveEffectiveProjectRoot(workspaceRoot, activeDocument?.uri.scheme === "file" ? activeDocument.uri.fsPath : undefined)
+        : undefined;
+    const effectiveWorkspaceFolder = effectiveProjectRoot && sourceWorkspaceFolder
+        ? {
+            uri: vscode.Uri.file(effectiveProjectRoot),
+            name: path.basename(effectiveProjectRoot),
+            index: sourceWorkspaceFolder.index
+        }
+        : sourceWorkspaceFolder;
     
     // Prepare language server
     const langServerInstallDir = path.join(context.globalStorageUri.fsPath, "langServerInstall");
@@ -35,12 +52,15 @@ export async function activateLanguageServer({ context, status, config, javaInst
         }
     }
 
-    const outputChannel = vscode.window.createOutputChannel("Kotlin");
+    const outputChannel = vscode.window.createOutputChannel("Kotlin Flutter (moatbitX)");
     context.subscriptions.push(outputChannel);
+    if (effectiveProjectRoot) {
+        outputChannel.appendLine(`[moatbitX] Kotlin project root: ${effectiveProjectRoot}`);
+    }
     
     const transportLayer = config.get("languageServer.transport");
-    let tcpPort: number = null;
-    let env: any = { ...process.env };
+    let tcpPort: number | undefined;
+    const env: NodeJS.ProcessEnv = { ...process.env };
 
     if (javaInstallation.javaHome) {
         env['JAVA_HOME'] = javaInstallation.javaHome;
@@ -70,9 +90,12 @@ export async function activateLanguageServer({ context, status, config, javaInst
     
     const startScriptPath = customPath || path.resolve(langServerInstallDir, "server", "bin", correctScriptName("kotlin-language-server"));
 
-    const storagePath = context.storageUri.fsPath
+    const projectStorageKey = effectiveProjectRoot
+        ? crypto.createHash("sha256").update(effectiveProjectRoot).digest("hex").substring(0, 16)
+        : "default";
+    const storagePath = path.join(context.storageUri.fsPath, "projects", projectStorageKey);
     if (!(await fsExists(storagePath))) {
-        await fs.promises.mkdir(storagePath);
+        await fs.promises.mkdir(storagePath, { recursive: true });
     }
 
     const customFileEventsGlobPatterns: string[] = config.get("languageServer.watchFiles")
@@ -85,11 +108,20 @@ export async function activateLanguageServer({ context, status, config, javaInst
         "**/settings.gradle"
     ];
 
-    const options = { outputChannel, startScriptPath, tcpPort, env, storagePath, fileEventsGlobPatterns };
+    const options = {
+        outputChannel,
+        startScriptPath,
+        tcpPort,
+        env,
+        storagePath,
+        fileEventsGlobPatterns,
+        workspaceFolder: effectiveWorkspaceFolder,
+        projectRoot: effectiveProjectRoot
+    };
     const languageClient = createLanguageClient(options);
 
     // Create the language client and start the client.
-    let languageClientPromise = languageClient.start();
+    const languageClientPromise = languageClient.start();
     
     // Register a content provider for the 'kls' scheme
     const contentProvider = new JarClassContentProvider(languageClient);
@@ -176,12 +208,15 @@ function createLanguageClient(options: {
     outputChannel: vscode.OutputChannel,
     startScriptPath: string,
     tcpPort?: number,
-    env?: any,
+    env?: NodeJS.ProcessEnv,
     storagePath: string,
-    fileEventsGlobPatterns: string[]
+    fileEventsGlobPatterns: string[],
+    workspaceFolder?: vscode.WorkspaceFolder,
+    projectRoot?: string
 }): LanguageClient {
     // Options to control the language client
     const clientOptions: LanguageClientOptions = {
+        workspaceFolder: options.workspaceFolder,
         // Register the server for Kotlin documents
         documentSelector: [
             { language: 'kotlin', scheme: 'file' },
@@ -195,7 +230,10 @@ function createLanguageClient(options: {
             // TODO this should be registered from the language server side
             fileEvents: options.fileEventsGlobPatterns.map(
                 function (globPattern: string): vscode.FileSystemWatcher {
-                    return vscode.workspace.createFileSystemWatcher(globPattern)
+                    const watcherPattern = options.workspaceFolder
+                        ? new vscode.RelativePattern(options.workspaceFolder, globPattern)
+                        : globPattern;
+                    return vscode.workspace.createFileSystemWatcher(watcherPattern);
                 }
             )
         },
@@ -223,20 +261,22 @@ function createLanguageClient(options: {
             args: [],
             options: {
                 shell: isOSWindows(),
-                cwd: vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath,
+                cwd: options.projectRoot,
                 env: options.env
-            } // TODO: Support multi-root workspaces (and improve support for when no available is available)
+            }
         }
         LOG.info("Creating client at {}", options.startScriptPath);
     }
 
-    return new LanguageClient("kotlin", "Kotlin Language Client", serverOptions, clientOptions);
+    return new LanguageClient("kotlin-flutter", "Kotlin Flutter Language Client", serverOptions, clientOptions);
 }
 
 export function spawnLanguageServerProcessAndConnectViaTcp(options: {
     outputChannel: vscode.OutputChannel,
     startScriptPath: string,
-    tcpPort?: number
+    tcpPort?: number,
+    env?: NodeJS.ProcessEnv,
+    projectRoot?: string
 }): Promise<StreamInfo> {
     return new Promise((resolve, reject) => {
         LOG.info("Creating server.")
@@ -248,7 +288,11 @@ export function spawnLanguageServerProcessAndConnectViaTcp(options: {
         // Wait for the first client to connect
         server.listen(options.tcpPort, () => {
             const tcpPort = (server.address() as net.AddressInfo).port.toString();
-            const proc = child_process.spawn(options.startScriptPath, ["--tcpClientPort", tcpPort], { shell: isOSWindows() });
+            const proc = child_process.spawn(options.startScriptPath, ["--tcpClientPort", tcpPort], {
+                shell: isOSWindows(),
+                cwd: options.projectRoot,
+                env: options.env
+            });
             LOG.info("Creating client at {} via TCP port {}", options.startScriptPath, tcpPort);
             
             const outputCallback = data => options.outputChannel.append(`${data}`);

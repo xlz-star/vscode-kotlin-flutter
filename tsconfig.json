@@ -21,6 +21,7 @@
         "node_modules",
         ".vscode-test",
         "bin",
-        "build"
+        "build",
+        "test"
     ]
 }

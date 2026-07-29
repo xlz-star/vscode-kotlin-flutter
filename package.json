@@ -1,15 +1,15 @@
 {
-    "name": "kotlin",
-    "displayName": "Kotlin",
-    "description": "Code completion, debugging, linting and more",
+    "name": "kotlin-flutter",
+    "displayName": "Kotlin Flutter (moatbitX)",
+    "description": "Kotlin language support with automatic Flutter Android project discovery",
     "icon": "resources/Icon128.png",
     "repository": {
         "type": "git",
-        "url": "https://github.com/fwcd/vscode-kotlin.git"
+        "url": "https://github.com/xlz-star/vscode-kotlin-flutter.git"
     },
-    "version": "0.2.37",
+    "version": "0.1.0",
     "preview": true,
-    "publisher": "fwcd",
+    "publisher": "moatbitx",
     "license": "MIT",
     "categories": [
         "Programming Languages",
