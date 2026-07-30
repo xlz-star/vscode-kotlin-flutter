@@ -23,5 +23,5 @@ __pycache__
 *.vsix
 
 # Automatically downloaded
-langServerInstall
-debugAdapterInstall
+/langServerInstall
+/debugAdapterInstall

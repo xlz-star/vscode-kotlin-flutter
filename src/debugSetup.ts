@@ -4,15 +4,26 @@ import * as child_process from "child_process";
 import { ServerDownloader } from "./serverDownloader";
 import { correctScriptName, isOSUnixoid } from "./util/osUtils";
 import { ServerSetupParams } from "./setupParams";
+import { fsExists } from "./util/fsUtils";
 
 export async function registerDebugAdapter({ context, status, config, javaInstallation, javaOpts }: ServerSetupParams): Promise<void> {
     status.update("Registering Kotlin Debug Adapter...");
     
-    // Prepare debug adapter
+    // Prefer the adapter bundled with the VSIX to keep first activation
+    // independent from GitHub API availability.
     const debugAdapterInstallDir = path.join(context.globalStorageUri.fsPath, "debugAdapterInstall");
+    const bundledStartScriptPath = path.join(
+        context.extensionPath,
+        "resources",
+        "debugAdapterInstall",
+        "adapter",
+        "bin",
+        correctScriptName("kotlin-debug-adapter")
+    );
+    const hasBundledDebugAdapter = await fsExists(bundledStartScriptPath);
     const customPath: string = config.get("debugAdapter.path");
     
-    if (!customPath) {
+    if (!customPath && !hasBundledDebugAdapter) {
         const debugAdapterDownloader = new ServerDownloader("Kotlin Debug Adapter", "kotlin-debug-adapter", "adapter.zip", "adapter", debugAdapterInstallDir);
         
         try {
@@ -24,14 +35,17 @@ export async function registerDebugAdapter({ context, status, config, javaInstal
         }
     }
     
-    const startScriptPath = customPath || path.join(debugAdapterInstallDir, "adapter", "bin", correctScriptName("kotlin-debug-adapter"));
+    const startScriptPath = customPath
+        || (hasBundledDebugAdapter
+            ? bundledStartScriptPath
+            : path.join(debugAdapterInstallDir, "adapter", "bin", correctScriptName("kotlin-debug-adapter")));
     
     // Ensure that start script can be executed
     if (isOSUnixoid()) {
         child_process.exec(`chmod +x ${startScriptPath}`);
     }
 
-    let env: any = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...process.env };
 
     if (javaInstallation.javaHome) {
         env['JAVA_HOME'] = javaInstallation.javaHome;
@@ -51,7 +65,7 @@ export async function registerDebugAdapter({ context, status, config, javaInstal
 export class KotlinDebugAdapterDescriptorFactory implements vscode.DebugAdapterDescriptorFactory {
     public constructor(
         private startScriptPath: string,
-        private env?: any
+        private env?: NodeJS.ProcessEnv
     ) {}
     
     async createDebugAdapterDescriptor(session: vscode.DebugSession, executable: vscode.DebugAdapterExecutable | undefined): Promise<vscode.DebugAdapterDescriptor> {

@@ -36,11 +36,21 @@ export async function activateLanguageServer({ context, status, config, javaInst
         }
         : sourceWorkspaceFolder;
     
-    // Prepare language server
+    // Prefer the server bundled with the VSIX so first activation does not
+    // depend on GitHub API availability or unauthenticated rate limits.
     const langServerInstallDir = path.join(context.globalStorageUri.fsPath, "langServerInstall");
+    const bundledStartScriptPath = path.join(
+        context.extensionPath,
+        "resources",
+        "langServerInstall",
+        "server",
+        "bin",
+        correctScriptName("kotlin-language-server")
+    );
+    const hasBundledLanguageServer = await fsExists(bundledStartScriptPath);
     const customPath: string = config.get("languageServer.path");
     
-    if (!customPath) {
+    if (!customPath && !hasBundledLanguageServer) {
         const langServerDownloader = new ServerDownloader("Kotlin Language Server", "kotlin-language-server", "server.zip", "server", langServerInstallDir);
         
         try {
@@ -88,7 +98,10 @@ export async function activateLanguageServer({ context, status, config, javaInst
 
     status.dispose();
     
-    const startScriptPath = customPath || path.resolve(langServerInstallDir, "server", "bin", correctScriptName("kotlin-language-server"));
+    const startScriptPath = customPath
+        || (hasBundledLanguageServer
+            ? bundledStartScriptPath
+            : path.resolve(langServerInstallDir, "server", "bin", correctScriptName("kotlin-language-server")));
 
     const projectStorageKey = effectiveProjectRoot
         ? crypto.createHash("sha256").update(effectiveProjectRoot).digest("hex").substring(0, 16)
